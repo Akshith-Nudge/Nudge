@@ -1,8 +1,10 @@
 import os
+import re
 from typing import Any
 from urllib.parse import urlparse
 
 import httpx
+from bs4 import BeautifulSoup
 
 from agent.tools.base import AgentTool
 
@@ -21,6 +23,7 @@ class WebSearchTool(AgentTool):
         "https://baresearch.org",
         "https://search.mectov.my.id",
     )
+    BING_SEARCH_URL = "https://www.bing.com/search"
 
     def __init__(self, timeout: float = 20.0) -> None:
         self.timeout = timeout
@@ -41,12 +44,11 @@ class WebSearchTool(AgentTool):
         if not query:
             raise ValueError("Search query cannot be empty.")
 
+        allowed_domains = self._extract_site_domains(query)
         headers = {
             "User-Agent": "NudgeMarketResearch/1.0",
-            "Accept": "application/json",
+            "Accept": "text/html,application/xhtml+xml,application/json",
         }
-
-        last_error: Exception | None = None
 
         async with httpx.AsyncClient(
             timeout=self.timeout,
@@ -64,60 +66,163 @@ class WebSearchTool(AgentTool):
                             "pageno": 1,
                         },
                     )
-
-                    if response.status_code in {403, 406}:
-                        raise RuntimeError(
-                            f"SearXNG instance rejected JSON search: {search_url}"
-                        )
-
                     response.raise_for_status()
+                    payload = response.json()
+                    results = self._normalize_results(payload.get("results", []))
+                    results = self._filter_results(results, allowed_domains)
 
-                    try:
-                        payload = response.json()
-                    except ValueError as exc:
-                        raise RuntimeError(
-                            f"SearXNG returned non-JSON response: {search_url}"
-                        ) from exc
+                    if results:
+                        return self._success(query, results, search_url)
 
-                    raw_results = payload.get("results", [])
-                    results: list[dict[str, str]] = []
+                except (httpx.HTTPError, ValueError):
+                    continue
 
-                    for item in raw_results:
-                        if not isinstance(item, dict):
-                            continue
+            try:
+                response = await client.get(
+                    self.BING_SEARCH_URL,
+                    params={"q": query, "count": 10, "setlang": "en-IN"},
+                    headers={
+                        "User-Agent": (
+                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                            "AppleWebKit/537.36 Chrome/154.0 Safari/537.36"
+                        ),
+                        "Accept": "text/html,application/xhtml+xml",
+                    },
+                )
+                response.raise_for_status()
 
-                        url = str(item.get("url") or "").strip()
-                        if not url:
-                            continue
+                soup = BeautifulSoup(response.text, "html.parser")
+                results = []
 
+                for item in soup.select("li.b_algo"):
+                    anchor = item.select_one("h2 a")
+                    if anchor is None:
+                        continue
+
+                    url = str(anchor.get("href") or "").strip()
+                    title = anchor.get_text(" ", strip=True)
+                    snippet_node = item.select_one(".b_caption p")
+                    snippet = (
+                        snippet_node.get_text(" ", strip=True)
+                        if snippet_node
+                        else ""
+                    )
+
+                    if url:
                         results.append(
                             {
-                                "title": str(item.get("title") or "").strip(),
+                                "title": title,
                                 "url": url,
-                                "snippet": str(
-                                    item.get("content")
-                                    or item.get("snippet")
-                                    or ""
-                                ).strip(),
+                                "snippet": snippet,
                             }
                         )
 
-                    if results:
-                        return {
-                            "status": "success",
-                            "query": query,
-                            "results": results,
-                            "result_count": len(results),
-                            "provider": search_url,
-                        }
+                results = self._filter_results(results, allowed_domains)
 
-                    last_error = RuntimeError(
-                        f"SearXNG returned no results: {search_url}"
-                    )
+                if results:
+                    return self._success(query, results, "bing")
 
-                except (httpx.HTTPError, RuntimeError, ValueError) as exc:
-                    last_error = exc
+            except (httpx.HTTPError, ValueError):
+                pass
 
         raise RuntimeError(
-            f"All configured SearXNG instances failed for query: {query}"
-        ) from last_error
+            f"No relevant search results found for query: {query}"
+        )
+
+    @staticmethod
+    def _extract_site_domains(query: str) -> tuple[str, ...]:
+        return tuple(
+            dict.fromkeys(
+                match.lower().removeprefix("www.")
+                for match in re.findall(
+                    r"(?:^|\\s)site:([a-zA-Z0-9.-]+)",
+                    query,
+                )
+            )
+        )
+
+    @classmethod
+    def _filter_results(
+        cls,
+        results: list[dict[str, str]],
+        allowed_domains: tuple[str, ...],
+    ) -> list[dict[str, str]]:
+        filtered = []
+
+        for result in results:
+            url = result.get("url", "")
+            if not cls._is_valid_research_url(url):
+                continue
+
+            if allowed_domains:
+                hostname = (urlparse(url).hostname or "").lower().removeprefix("www.")
+                if not any(
+                    hostname == domain or hostname.endswith(f".{domain}")
+                    for domain in allowed_domains
+                ):
+                    continue
+
+            filtered.append(result)
+
+        return filtered
+
+    @staticmethod
+    def _normalize_results(raw_results: Any) -> list[dict[str, str]]:
+        results = []
+
+        if not isinstance(raw_results, list):
+            return results
+
+        for item in raw_results:
+            if not isinstance(item, dict):
+                continue
+
+            url = str(item.get("url") or "").strip()
+            if not url:
+                continue
+
+            results.append(
+                {
+                    "title": str(item.get("title") or "").strip(),
+                    "url": url,
+                    "snippet": str(
+                        item.get("content") or item.get("snippet") or ""
+                    ).strip(),
+                }
+            )
+
+        return results
+
+    @staticmethod
+    def _success(
+        query: str,
+        results: list[dict[str, str]],
+        provider: str,
+    ) -> dict[str, Any]:
+        return {
+            "status": "success",
+            "query": query,
+            "results": results,
+            "result_count": len(results),
+            "provider": provider,
+        }
+
+    @staticmethod
+    def _is_valid_research_url(url: str) -> bool:
+        try:
+            parsed = urlparse(url)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                return False
+
+            hostname = (parsed.hostname or "").lower()
+            blocked_hosts = {
+                "duckduckgo.com",
+                "www.duckduckgo.com",
+                "bing.com",
+                "www.bing.com",
+                "google.com",
+                "www.google.com",
+            }
+            return hostname not in blocked_hosts
+        except ValueError:
+            return False
