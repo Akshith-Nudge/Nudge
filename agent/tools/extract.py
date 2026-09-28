@@ -251,7 +251,7 @@ class ExtractionTool(AgentTool):
         preserved: list[str] = []
 
         for match in re.finditer(
-            r"<script\\b[^>]*>(.*?)</script>",
+            r"<script\b[^>]*>(.*?)</script>",
             html,
             flags=re.IGNORECASE | re.DOTALL,
         ):
@@ -275,21 +275,21 @@ class ExtractionTool(AgentTool):
 
         # Remove executable scripts and styles from the visible HTML.
         html = re.sub(
-            r"<script\\b[^>]*>.*?</script>",
+            r"<script\b[^>]*>.*?</script>",
             " ",
             html,
             flags=re.IGNORECASE | re.DOTALL,
         )
 
         html = re.sub(
-            r"<style\\b[^>]*>.*?</style>",
+            r"<style\b[^>]*>.*?</style>",
             " ",
             html,
             flags=re.IGNORECASE | re.DOTALL,
         )
 
         html = re.sub(
-            r"<noscript\\b[^>]*>.*?</noscript>",
+            r"<noscript\b[^>]*>.*?</noscript>",
             " ",
             html,
             flags=re.IGNORECASE | re.DOTALL,
