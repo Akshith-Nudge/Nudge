@@ -72,37 +72,70 @@ class WebSearchTool(AgentTool):
         results: list[dict[str, str]] = []
 
         if provider == "bing-browser":
-            items = await page.locator("li.b_algo").all()
-            for item in items:
-                anchor = item.locator("h2 a").first
-                if await anchor.count() == 0:
+            anchors = await page.locator("a").all()
+
+            for anchor in anchors:
+                try:
+                    href = await anchor.get_attribute("href")
+                    title = (await anchor.inner_text()).strip()
+
+                    if not href or not title:
+                        continue
+
+                    if not href.startswith(("http://", "https://")):
+                        continue
+
+                    parsed = urlparse(href)
+                    hostname = (parsed.hostname or "").lower()
+
+                    if hostname in {
+                        "",
+                        "bing.com",
+                        "www.bing.com",
+                        "microsoft.com",
+                        "www.microsoft.com",
+                    }:
+                        continue
+
+                    if len(title) < 3:
+                        continue
+
+                    results.append(
+                        {
+                            "title": title,
+                            "url": href.strip(),
+                            "snippet": "",
+                        }
+                    )
+                except Exception:
                     continue
-                href = await anchor.get_attribute("href")
-                if not href:
-                    continue
-                snippet_node = item.locator(".b_caption p").first
-                results.append({
-                    "title": (await anchor.inner_text()).strip(),
-                    "url": href.strip(),
-                    "snippet": (await snippet_node.inner_text()).strip()
-                    if await snippet_node.count() else "",
-                })
+
             return results
 
         for item in await page.locator(".result").all():
             anchor = item.locator("a.result__a").first
+
             if await anchor.count() == 0:
                 continue
+
             href = await anchor.get_attribute("href")
+
             if not href:
                 continue
+
             snippet_node = item.locator(".result__snippet").first
-            results.append({
-                "title": (await anchor.inner_text()).strip(),
-                "url": href.strip(),
-                "snippet": (await snippet_node.inner_text()).strip()
-                if await snippet_node.count() else "",
-            })
+
+            results.append(
+                {
+                    "title": (await anchor.inner_text()).strip(),
+                    "url": href.strip(),
+                    "snippet": (
+                        (await snippet_node.inner_text()).strip()
+                        if await snippet_node.count()
+                        else ""
+                    ),
+                }
+            )
 
         return results
 
