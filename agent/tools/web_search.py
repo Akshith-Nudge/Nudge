@@ -72,43 +72,48 @@ class WebSearchTool(AgentTool):
         results: list[dict[str, str]] = []
 
         if provider == "bing-browser":
-            anchors = await page.locator("a").all()
+            # Read the rendered DOM in one browser-side operation.
+            # Bing's result markup changes frequently, so avoid depending on
+            # a single CSS class such as li.b_algo.
+            anchors = await page.locator("a").evaluate_all(
+                """elements => elements.map(a => ({
+                    href: a.href || "",
+                    title: (a.innerText || a.textContent || "").trim()
+                }))"""
+            )
 
-            for anchor in anchors:
-                try:
-                    href = await anchor.get_attribute("href")
-                    title = (await anchor.inner_text()).strip()
+            for item in anchors:
+                href = str(item.get("href", "")).strip()
+                title = str(item.get("title", "")).strip()
 
-                    if not href or not title:
-                        continue
-
-                    if not href.startswith(("http://", "https://")):
-                        continue
-
-                    parsed = urlparse(href)
-                    hostname = (parsed.hostname or "").lower()
-
-                    if hostname in {
-                        "",
-                        "bing.com",
-                        "www.bing.com",
-                        "microsoft.com",
-                        "www.microsoft.com",
-                    }:
-                        continue
-
-                    if len(title) < 3:
-                        continue
-
-                    results.append(
-                        {
-                            "title": title,
-                            "url": href.strip(),
-                            "snippet": "",
-                        }
-                    )
-                except Exception:
+                if not href or not title:
                     continue
+
+                if not href.startswith(("http://", "https://")):
+                    continue
+
+                parsed = urlparse(href)
+                hostname = (parsed.hostname or "").lower()
+
+                if hostname in {
+                    "",
+                    "bing.com",
+                    "www.bing.com",
+                    "microsoft.com",
+                    "www.microsoft.com",
+                }:
+                    continue
+
+                if len(title) < 3:
+                    continue
+
+                results.append(
+                    {
+                        "title": title,
+                        "url": href,
+                        "snippet": "",
+                    }
+                )
 
             return results
 
