@@ -244,23 +244,52 @@ class ExtractionTool(AgentTool):
         html: str,
     ) -> str:
 
-        # Remove scripts and styles completely.
+        # Preserve structured application data before removing scripts.
+        # Modern e-commerce SPAs frequently render product information
+        # through JSON-LD, Next.js/Nuxt state, or other application
+        # bootstrap payloads rather than plain body text.
+        preserved: list[str] = []
+
+        for match in re.finditer(
+            r"<script\\b[^>]*>(.*?)</script>",
+            html,
+            flags=re.IGNORECASE | re.DOTALL,
+        ):
+            tag = match.group(0)
+            body = match.group(1).strip()
+            if not body:
+                continue
+
+            tag_lower = tag.lower()
+
+            if (
+                'type="application/ld+json"' in tag_lower
+                or "type='application/ld+json'" in tag_lower
+                or "__next_data__" in tag_lower
+                or "application/json" in tag_lower
+                or "__nuxt" in tag_lower
+                or "__initial_state__" in tag_lower
+                or "__initialstate__" in tag_lower
+            ):
+                preserved.append(body)
+
+        # Remove executable scripts and styles from the visible HTML.
         html = re.sub(
-            r"<script\b[^>]*>.*?</script>",
+            r"<script\\b[^>]*>.*?</script>",
             " ",
             html,
             flags=re.IGNORECASE | re.DOTALL,
         )
 
         html = re.sub(
-            r"<style\b[^>]*>.*?</style>",
+            r"<style\\b[^>]*>.*?</style>",
             " ",
             html,
             flags=re.IGNORECASE | re.DOTALL,
         )
 
         html = re.sub(
-            r"<noscript\b[^>]*>.*?</noscript>",
+            r"<noscript\\b[^>]*>.*?</noscript>",
             " ",
             html,
             flags=re.IGNORECASE | re.DOTALL,
@@ -269,7 +298,7 @@ class ExtractionTool(AgentTool):
         # Convert common structural tags into line breaks.
         html = re.sub(
             r"</(div|p|li|section|article|h1|h2|h3|h4|tr)>",
-            "\n",
+            "\\n",
             html,
             flags=re.IGNORECASE,
         )
@@ -281,4 +310,11 @@ class ExtractionTool(AgentTool):
             html,
         )
 
-        return unescape(html)
+        visible_text = unescape(html)
+
+        if preserved:
+            visible_text += "\\n\\n[STRUCTURED APPLICATION DATA]\\n" + (
+                "\\n".join(unescape(item) for item in preserved)
+            )
+
+        return visible_text
