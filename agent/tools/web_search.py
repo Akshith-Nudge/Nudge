@@ -1,6 +1,6 @@
-from html.parser import HTMLParser
+import os
 from typing import Any
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import urlparse
 
 import httpx
 
@@ -16,16 +16,23 @@ class WebSearchTool(AgentTool):
         "competitors, pricing, availability, and other market intelligence."
     )
 
-    SEARCH_URL = (
-        "https://html.duckduckgo.com/html/"
-    )
+    DEFAULT_SEARXNG_URL = "https://search.mectov.my.id"
 
     def __init__(
         self,
         timeout: float = 20.0,
     ) -> None:
-
         self.timeout = timeout
+        self.search_url = os.getenv(
+            "SEARXNG_URL",
+            self.DEFAULT_SEARXNG_URL,
+        ).strip().rstrip("/")
+
+        parsed_url = urlparse(self.search_url)
+        if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
+            raise ValueError(
+                "SEARXNG_URL must be a valid HTTP or HTTPS base URL."
+            )
 
     async def execute(
         self,
@@ -36,22 +43,11 @@ class WebSearchTool(AgentTool):
         query = query.strip()
 
         if not query:
-            raise ValueError(
-                "Search query cannot be empty."
-            )
+            raise ValueError("Search query cannot be empty.")
 
         headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 "
-                "(KHTML, like Gecko) "
-                "Chrome/153.0.0.0 Safari/537.36"
-            ),
-            "Accept": (
-                "text/html,application/xhtml+xml,"
-                "application/xml;q=0.9,*/*;q=0.8"
-            ),
-            "Accept-Language": "en-IN,en;q=0.9",
+            "User-Agent": "NudgeMarketResearch/1.0",
+            "Accept": "application/json",
         }
 
         async with httpx.AsyncClient(
@@ -59,17 +55,53 @@ class WebSearchTool(AgentTool):
             follow_redirects=True,
             headers=headers,
         ) as client:
-
             response = await client.get(
-                self.SEARCH_URL,
-                params={"q": query},
+                f"{self.search_url}/search",
+                params={
+                    "q": query,
+                    "format": "json",
+                    "language": "en",
+                    "pageno": 1,
+                },
             )
+
+            if response.status_code in {403, 406}:
+                raise RuntimeError(
+                    "The configured SearXNG instance rejected JSON search "
+                    "requests. Set SEARXNG_URL to another instance that "
+                    "allows the /search?format=json endpoint."
+                )
 
             response.raise_for_status()
 
-        results = self._parse_results(
-            response.text
-        )
+            try:
+                payload = response.json()
+            except ValueError as exc:
+                raise RuntimeError(
+                    "SearXNG returned a non-JSON response. The instance may "
+                    "have JSON output disabled; choose another SEARXNG_URL."
+                ) from exc
+
+        raw_results = payload.get("results", [])
+        results: list[dict[str, str]] = []
+
+        for item in raw_results:
+            if not isinstance(item, dict):
+                continue
+
+            url = str(item.get("url") or "").strip()
+            if not url:
+                continue
+
+            results.append(
+                {
+                    "title": str(item.get("title") or "").strip(),
+                    "url": url,
+                    "snippet": str(
+                        item.get("content") or item.get("snippet") or ""
+                    ).strip(),
+                }
+            )
 
         return {
             "status": "success",
@@ -77,227 +109,3 @@ class WebSearchTool(AgentTool):
             "results": results,
             "result_count": len(results),
         }
-
-    def _parse_results(
-        self,
-        html: str,
-    ) -> list[dict[str, str]]:
-
-        class SearchResultParser(
-            HTMLParser
-        ):
-
-            def __init__(self) -> None:
-
-                super().__init__()
-
-                self.results: list[
-                    dict[str, str]
-                ] = []
-
-                self.current: (
-                    dict[str, str] | None
-                ) = None
-
-                self.capture_title = False
-                self.capture_snippet = False
-
-            def handle_starttag(
-                self,
-                tag: str,
-                attrs: list[
-                    tuple[str, str | None]
-                ],
-            ) -> None:
-
-                attributes = dict(attrs)
-
-                classes = (
-                    attributes.get(
-                        "class",
-                        "",
-                    )
-                    or ""
-                )
-
-                # Search result title.
-                if (
-                    tag == "a"
-                    and "result__a" in classes
-                ):
-
-                    self._finalize_current()
-                    raw_url = (
-                        attributes.get(
-                            "href",
-                            "",
-                        )
-                        or ""
-                    )
-
-                    self.current = {
-                        "title": "",
-                        "url": (
-                            self._decode_result_url(
-                                raw_url
-                            )
-                        ),
-                        "snippet": "",
-                    }
-
-                    self.capture_title = True
-
-                    return
-
-                # Search result snippet.
-                if (
-                    tag == "a"
-                    and "result__snippet"
-                    in classes
-                    and self.current is not None
-                ):
-
-                    self.capture_snippet = True
-
-                    return
-
-                # Some DDG responses use a div/span
-                # around the snippet.
-                if (
-                    self.current is not None
-                    and (
-                        "result__snippet"
-                        in classes
-                    )
-                ):
-
-                    self.capture_snippet = True
-
-            def handle_data(
-                self,
-                data: str,
-            ) -> None:
-
-                if self.current is None:
-                    return
-
-                text = data.strip()
-
-                if not text:
-                    return
-
-                if self.capture_title:
-
-                    self.current["title"] += (
-                        text + " "
-                    )
-
-                elif self.capture_snippet:
-
-                    self.current["snippet"] += (
-                        text + " "
-                    )
-
-            def handle_endtag(
-                self,
-                tag: str,
-            ) -> None:
-
-                if tag == "a":
-                    self.capture_title = False
-                    self.capture_snippet = False
-
-                elif self.capture_snippet:
-                    self.capture_snippet = False
-
-            def _finalize_current(
-                self,
-            ) -> None:
-
-                if self.current is None:
-                    return
-
-                result = {
-                    "title": self.current[
-                        "title"
-                    ].strip(),
-                    "url": self.current[
-                        "url"
-                    ].strip(),
-                    "snippet": self.current[
-                        "snippet"
-                    ].strip(),
-                }
-
-                if result["url"]:
-
-                    self.results.append(
-                        result
-                    )
-
-                self.current = None
-
-            def close(self) -> None:
-                super().close()
-                self._finalize_current()
-
-            @staticmethod
-            def _decode_result_url(
-                raw_url: str,
-            ) -> str:
-
-                raw_url = raw_url.strip()
-
-                if not raw_url:
-                    return ""
-
-                # DDG redirect URL.
-                if (
-                    "duckduckgo.com/l/"
-                    in raw_url
-                ):
-
-                    parsed = urlparse(
-                        
-                            "https:" + raw_url
-                            if raw_url.startswith(
-                                "//"
-                            )
-                            else raw_url
-                        
-                    )
-
-                    query = parse_qs(
-                        parsed.query
-                    )
-
-                    destination = query.get(
-                        "uddg"
-                    )
-
-                    if destination:
-
-                        return unquote(
-                            destination[0]
-                        )
-
-                if raw_url.startswith(
-                    "//"
-                ):
-
-                    return (
-                        "https:" + raw_url
-                    )
-
-                return raw_url
-
-        parser = SearchResultParser()
-
-        parser.feed(html)
-        parser.close()
-
-        return [
-            result
-            for result in parser.results
-            if result.get("url")
-        ]
