@@ -14,7 +14,10 @@ class WebSearchTool(AgentTool):
         "marketplaces, competitors, pricing, availability, and other market intelligence."
     )
 
-    SEARCH_URL = "https://www.bing.com/search"
+    SEARCH_URLS = (
+        ("bing-browser", "https://www.bing.com/search?q={query}&setlang=en-IN"),
+        ("duckduckgo-browser", "https://html.duckduckgo.com/html/?q={query}&kl=us-en"),
+    )
 
     def __init__(self, timeout: float = 30.0) -> None:
         self.timeout = timeout
@@ -39,54 +42,69 @@ class WebSearchTool(AgentTool):
         allowed_domains = self._extract_site_domains(query)
         session = await self._start()
 
-        url = f"{self.SEARCH_URL}?q={quote_plus(query)}&setlang=en-IN"
-        result = await session.navigate(url)
+        for provider, template in self.SEARCH_URLS:
+            url = template.format(query=quote_plus(query))
 
-        page = session._require_page()
+            try:
+                result = await session.navigate(url)
+                page = session._require_page()
+                results = await self._extract_results(page, provider)
+                results = self._filter_results(results, allowed_domains)
 
+                if results:
+                    return {
+                        "status": "success",
+                        "query": query,
+                        "results": results,
+                        "result_count": len(results),
+                        "provider": provider,
+                        "search_url": result.get("url", url),
+                    }
+            except Exception:
+                continue
+
+        raise RuntimeError(
+            f"No relevant search results found for query: {query}"
+        )
+
+    @staticmethod
+    async def _extract_results(page: Any, provider: str) -> list[dict[str, str]]:
         results: list[dict[str, str]] = []
 
-        for item in await page.locator("li.b_algo").all():
-            anchor = item.locator("h2 a").first
+        if provider == "bing-browser":
+            items = await page.locator("li.b_algo").all()
+            for item in items:
+                anchor = item.locator("h2 a").first
+                if await anchor.count() == 0:
+                    continue
+                href = await anchor.get_attribute("href")
+                if not href:
+                    continue
+                snippet_node = item.locator(".b_caption p").first
+                results.append({
+                    "title": (await anchor.inner_text()).strip(),
+                    "url": href.strip(),
+                    "snippet": (await snippet_node.inner_text()).strip()
+                    if await snippet_node.count() else "",
+                })
+            return results
+
+        for item in await page.locator(".result").all():
+            anchor = item.locator("a.result__a").first
             if await anchor.count() == 0:
                 continue
-
             href = await anchor.get_attribute("href")
-            title = (await anchor.inner_text()).strip()
-
             if not href:
                 continue
+            snippet_node = item.locator(".result__snippet").first
+            results.append({
+                "title": (await anchor.inner_text()).strip(),
+                "url": href.strip(),
+                "snippet": (await snippet_node.inner_text()).strip()
+                if await snippet_node.count() else "",
+            })
 
-            snippet_node = item.locator(".b_caption p").first
-            snippet = (
-                (await snippet_node.inner_text()).strip()
-                if await snippet_node.count()
-                else ""
-            )
-
-            results.append(
-                {
-                    "title": title,
-                    "url": href.strip(),
-                    "snippet": snippet,
-                }
-            )
-
-        results = self._filter_results(results, allowed_domains)
-
-        if not results:
-            raise RuntimeError(
-                f"No relevant search results found for query: {query}"
-            )
-
-        return {
-            "status": "success",
-            "query": query,
-            "results": results,
-            "result_count": len(results),
-            "provider": "bing-browser",
-            "search_url": result.get("url", url),
-        }
+        return results
 
     @staticmethod
     def _extract_site_domains(query: str) -> tuple[str, ...]:
