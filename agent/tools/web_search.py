@@ -15,8 +15,9 @@ class WebSearchTool(AgentTool):
     )
 
     SEARCH_URLS = (
+        ("mojeek-browser", "https://www.mojeek.com/search?q={query}"),
+        ("duckduckgo-lite-browser", "https://lite.duckduckgo.com/lite/?q={query}"),
         ("bing-browser", "https://www.bing.com/search?q={query}&setlang=en-IN"),
-        ("duckduckgo-browser", "https://html.duckduckgo.com/html/?q={query}&kl=us-en"),
     )
 
     def __init__(self, timeout: float = 30.0) -> None:
@@ -70,6 +71,75 @@ class WebSearchTool(AgentTool):
     @staticmethod
     async def _extract_results(page: Any, provider: str) -> list[dict[str, str]]:
         results: list[dict[str, str]] = []
+
+        if provider == "mojeek-browser":
+            anchors = await page.locator("a").evaluate_all(
+                """elements => elements.map(a => ({
+                    href: a.href || "",
+                    title: (a.innerText || a.textContent || "").trim()
+                }))"""
+            )
+
+            for item in anchors:
+                href = str(item.get("href", "")).strip()
+                title = str(item.get("title", "")).strip()
+
+                if not href or not title or not href.startswith(("http://", "https://")):
+                    continue
+
+                parsed = urlparse(href)
+                hostname = (parsed.hostname or "").lower().removeprefix("www.")
+
+                if hostname in {"mojeek.com", "duckduckgo.com", "bing.com", "microsoft.com"}:
+                    continue
+
+                if len(title) < 3:
+                    continue
+
+                results.append({"title": title, "url": href, "snippet": ""})
+
+            return results
+
+        if provider == "duckduckgo-lite-browser":
+            anchors = await page.locator("a").evaluate_all(
+                """elements => elements.map(a => ({
+                    href: a.href || "",
+                    title: (a.innerText || a.textContent || "").trim()
+                }))"""
+            )
+
+            for item in anchors:
+                href = str(item.get("href", "")).strip()
+                title = str(item.get("title", "")).strip()
+
+                if not href or not title:
+                    continue
+
+                parsed = urlparse(href)
+                hostname = (parsed.hostname or "").lower().removeprefix("www.")
+
+                # DDG Lite wraps destinations in /l/?uddg=... redirect URLs.
+                if hostname.endswith("duckduckgo.com"):
+                    from urllib.parse import parse_qs
+
+                    target = parse_qs(parsed.query).get("uddg", [None])[0]
+                    if target:
+                        href = target
+                        parsed = urlparse(href)
+                        hostname = (parsed.hostname or "").lower().removeprefix("www.")
+
+                if not href.startswith(("http://", "https://")):
+                    continue
+
+                if hostname in {"duckduckgo.com", "bing.com", "microsoft.com"}:
+                    continue
+
+                if len(title) < 3:
+                    continue
+
+                results.append({"title": title, "url": href, "snippet": ""})
+
+            return results
 
         if provider == "bing-browser":
             # Read the rendered DOM in one browser-side operation.
@@ -197,6 +267,7 @@ class WebSearchTool(AgentTool):
             blocked_hosts = {
                 "duckduckgo.com",
                 "www.duckduckgo.com",
+                "lite.duckduckgo.com",
                 "bing.com",
                 "www.bing.com",
                 "google.com",
